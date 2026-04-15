@@ -38,7 +38,7 @@ public:
 private:
     bool set_general_gain_internal(float gain);
     bool set_channel_gains_internal(const std::map<uint8_t, float> &gains);
-    bool read_data_routed_for_rymcu_bigsmart(uint8_t *data, size_t size);
+    bool read_data_routed_for_main_reference_pair(uint8_t *data, size_t size);
 
     bool is_valid_internal() const
     {

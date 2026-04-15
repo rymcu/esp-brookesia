@@ -26,37 +26,76 @@ esp_codec_dev_handle_t get_codec_handle(void *handles)
     return reinterpret_cast<dev_audio_codec_handles_t *>(handles)->codec_dev;
 }
 
-constexpr uint8_t RYMCU_BIGSMART_OUTPUT_BITS = 16;
-constexpr uint8_t RYMCU_BIGSMART_OUTPUT_CHANNELS = 2;
-constexpr uint8_t RYMCU_BIGSMART_RAW_BITS = 16;
-constexpr uint8_t RYMCU_BIGSMART_RAW_CHANNELS = 4;
-constexpr uint8_t RYMCU_BIGSMART_FIXED_MAIN_MIC_SLOT = 2;  // slot2 = MIC2
-constexpr uint8_t RYMCU_BIGSMART_REFERENCE_MIC_SLOT = 1;   // slot1 = MIC3
-constexpr float RYMCU_BIGSMART_REFERENCE_GAIN_DB = 10.0f;
-constexpr uint16_t RYMCU_BIGSMART_RAW_CHANNEL_MASK =
-    ESP_CODEC_DEV_MAKE_CHANNEL_MASK(0) |
-    ESP_CODEC_DEV_MAKE_CHANNEL_MASK(1) |
-    ESP_CODEC_DEV_MAKE_CHANNEL_MASK(2) |
-    ESP_CODEC_DEV_MAKE_CHANNEL_MASK(3);
+constexpr size_t MAIN_REFERENCE_OUTPUT_FRAME_SAMPLES = 2;
 
-constexpr bool use_rymcu_bigsmart_audio_route()
+constexpr uint16_t make_contiguous_channel_mask(uint8_t channel_count)
 {
-#if CONFIG_ESP_BOARD_RYMCU_BIGSMART
-    return true;
-#else
-    return false;
-#endif
+    uint16_t mask = 0;
+    for (uint8_t channel = 0; channel < channel_count; ++channel) {
+        mask |= ESP_CODEC_DEV_MAKE_CHANNEL_MASK(channel);
+    }
+    return mask;
 }
 
-void override_info_for_special_board(AudioCodecRecorderIface::Info &info)
+constexpr bool use_main_reference_audio_route()
 {
-    if (use_rymcu_bigsmart_audio_route()) {
-        // Match the old xiaozhi board port: expose 2x16-bit [main, reference]
-        // while internally still reading the 4-slot TDM stream from ES7210.
-        info.bits = RYMCU_BIGSMART_OUTPUT_BITS;
-        info.channels = RYMCU_BIGSMART_OUTPUT_CHANNELS;
-        info.mic_layout = "MR";
+    return BROOKESIA_HAL_ADAPTOR_AUDIO_CODEC_RECORDER_ENABLE_MAIN_REFERENCE_ROUTE;
+}
+
+constexpr uint16_t MAIN_REFERENCE_ROUTE_RAW_CHANNEL_MASK = make_contiguous_channel_mask(
+    BROOKESIA_HAL_ADAPTOR_AUDIO_CODEC_RECORDER_MAIN_REFERENCE_ROUTE_RAW_CHANNELS
+);
+
+bool validate_main_reference_audio_route_config(const AudioCodecRecorderIface::Info &info)
+{
+    if (!use_main_reference_audio_route()) {
+        return true;
     }
+
+    BROOKESIA_CHECK_FALSE_RETURN(
+        info.bits == 16, false, "Main/reference recorder route requires 16-bit output, got %1%", info.bits
+    );
+    BROOKESIA_CHECK_FALSE_RETURN(
+        info.channels == MAIN_REFERENCE_OUTPUT_FRAME_SAMPLES,
+        false,
+        "Main/reference recorder route requires %1% output channels, got %2%",
+        MAIN_REFERENCE_OUTPUT_FRAME_SAMPLES,
+        info.channels
+    );
+    BROOKESIA_CHECK_FALSE_RETURN(
+        BROOKESIA_HAL_ADAPTOR_AUDIO_CODEC_RECORDER_MAIN_REFERENCE_ROUTE_MAIN_SLOT <
+            BROOKESIA_HAL_ADAPTOR_AUDIO_CODEC_RECORDER_MAIN_REFERENCE_ROUTE_RAW_CHANNELS,
+        false,
+        "Main microphone slot(%1%) exceeds raw channel count(%2%)",
+        BROOKESIA_HAL_ADAPTOR_AUDIO_CODEC_RECORDER_MAIN_REFERENCE_ROUTE_MAIN_SLOT,
+        BROOKESIA_HAL_ADAPTOR_AUDIO_CODEC_RECORDER_MAIN_REFERENCE_ROUTE_RAW_CHANNELS
+    );
+    BROOKESIA_CHECK_FALSE_RETURN(
+        BROOKESIA_HAL_ADAPTOR_AUDIO_CODEC_RECORDER_MAIN_REFERENCE_ROUTE_REFERENCE_SLOT <
+            BROOKESIA_HAL_ADAPTOR_AUDIO_CODEC_RECORDER_MAIN_REFERENCE_ROUTE_RAW_CHANNELS,
+        false,
+        "Reference microphone slot(%1%) exceeds raw channel count(%2%)",
+        BROOKESIA_HAL_ADAPTOR_AUDIO_CODEC_RECORDER_MAIN_REFERENCE_ROUTE_REFERENCE_SLOT,
+        BROOKESIA_HAL_ADAPTOR_AUDIO_CODEC_RECORDER_MAIN_REFERENCE_ROUTE_RAW_CHANNELS
+    );
+    BROOKESIA_CHECK_FALSE_RETURN(
+        BROOKESIA_HAL_ADAPTOR_AUDIO_CODEC_RECORDER_MAIN_REFERENCE_ROUTE_MAIN_GAIN_CHANNEL <
+            BROOKESIA_HAL_ADAPTOR_AUDIO_CODEC_RECORDER_MAIN_REFERENCE_ROUTE_GAIN_CHANNELS,
+        false,
+        "Main microphone gain channel(%1%) exceeds gain channel count(%2%)",
+        BROOKESIA_HAL_ADAPTOR_AUDIO_CODEC_RECORDER_MAIN_REFERENCE_ROUTE_MAIN_GAIN_CHANNEL,
+        BROOKESIA_HAL_ADAPTOR_AUDIO_CODEC_RECORDER_MAIN_REFERENCE_ROUTE_GAIN_CHANNELS
+    );
+    BROOKESIA_CHECK_FALSE_RETURN(
+        BROOKESIA_HAL_ADAPTOR_AUDIO_CODEC_RECORDER_MAIN_REFERENCE_ROUTE_REFERENCE_GAIN_CHANNEL <
+            BROOKESIA_HAL_ADAPTOR_AUDIO_CODEC_RECORDER_MAIN_REFERENCE_ROUTE_GAIN_CHANNELS,
+        false,
+        "Reference microphone gain channel(%1%) exceeds gain channel count(%2%)",
+        BROOKESIA_HAL_ADAPTOR_AUDIO_CODEC_RECORDER_MAIN_REFERENCE_ROUTE_REFERENCE_GAIN_CHANNEL,
+        BROOKESIA_HAL_ADAPTOR_AUDIO_CODEC_RECORDER_MAIN_REFERENCE_ROUTE_GAIN_CHANNELS
+    );
+
+    return true;
 }
 
 esp_codec_dev_sample_info_t make_open_sample_info(const AudioCodecRecorderIface::Info &info)
@@ -70,12 +109,9 @@ esp_codec_dev_sample_info_t make_open_sample_info(const AudioCodecRecorderIface:
     };
 #pragma GCC diagnostic pop
 
-    if (use_rymcu_bigsmart_audio_route()) {
-        // Recreate the legacy board behavior:
-        // read full 4-slot TDM data first, then route it to [MIC2, MIC3].
-        sample_info.bits_per_sample = RYMCU_BIGSMART_RAW_BITS;
-        sample_info.channel = RYMCU_BIGSMART_RAW_CHANNELS;
-        sample_info.channel_mask = RYMCU_BIGSMART_RAW_CHANNEL_MASK;
+    if (use_main_reference_audio_route()) {
+        sample_info.channel = BROOKESIA_HAL_ADAPTOR_AUDIO_CODEC_RECORDER_MAIN_REFERENCE_ROUTE_RAW_CHANNELS;
+        sample_info.channel_mask = MAIN_REFERENCE_ROUTE_RAW_CHANNEL_MASK;
     }
 
     return sample_info;
@@ -97,8 +133,6 @@ AudioCodecRecorderIface::Info generate_info()
     if (!result) {
         BROOKESIA_LOGE("Invalid channel gains config: %1%", BROOKESIA_HAL_ADAPTOR_AUDIO_CODEC_RECORDER_CHANNEL_GAINS);
     }
-
-    override_info_for_special_board(info);
 
     return info;
 }
@@ -142,6 +176,9 @@ bool AudioCodecRecorderImpl::open()
     BROOKESIA_CHECK_FALSE_RETURN(is_valid_internal(), false, "Recorder is not initialized");
 
     auto &info = get_info();
+    BROOKESIA_CHECK_FALSE_RETURN(
+        validate_main_reference_audio_route_config(info), false, "Invalid main/reference recorder route configuration"
+    );
     auto sample_info = make_open_sample_info(info);
     auto ret = esp_codec_dev_open(get_codec_handle(handles_), &sample_info);
     BROOKESIA_CHECK_FALSE_RETURN(ret == ESP_CODEC_DEV_OK, false, "Failed to open recorder: %1%", ret);
@@ -151,12 +188,16 @@ bool AudioCodecRecorderImpl::open()
     BROOKESIA_CHECK_FALSE_EXECUTE(
         set_general_gain_internal(info.general_gain), {}, { BROOKESIA_LOGE("Failed to set general gain: %1%", ret); }
     );
-    if (use_rymcu_bigsmart_audio_route()) {
+    if (use_main_reference_audio_route()) {
         ret = esp_codec_dev_set_in_channel_gain(
-                  get_codec_handle(handles_), ESP_CODEC_DEV_MAKE_CHANNEL_MASK(2), RYMCU_BIGSMART_REFERENCE_GAIN_DB
+                  get_codec_handle(handles_),
+                  ESP_CODEC_DEV_MAKE_CHANNEL_MASK(
+                      BROOKESIA_HAL_ADAPTOR_AUDIO_CODEC_RECORDER_MAIN_REFERENCE_ROUTE_REFERENCE_GAIN_CHANNEL
+                  ),
+                  std::stof(BROOKESIA_HAL_ADAPTOR_AUDIO_CODEC_RECORDER_MAIN_REFERENCE_ROUTE_REFERENCE_GAIN_DB)
               );
         BROOKESIA_CHECK_FALSE_EXECUTE(ret == ESP_CODEC_DEV_OK, {}, {
-            BROOKESIA_LOGE("Failed to set MIC3(reference) gain: %1%", ret);
+            BROOKESIA_LOGE("Failed to set reference microphone gain: %1%", ret);
         });
     }
     BROOKESIA_CHECK_FALSE_EXECUTE(
@@ -192,8 +233,8 @@ bool AudioCodecRecorderImpl::read_data(uint8_t *data, size_t size)
     BROOKESIA_CHECK_FALSE_RETURN(is_opened_internal(), false, "Recorder is not opened");
     BROOKESIA_CHECK_NULL_RETURN(data, false, "Invalid audio data");
 
-    if (use_rymcu_bigsmart_audio_route()) {
-        return read_data_routed_for_rymcu_bigsmart(data, size);
+    if (use_main_reference_audio_route()) {
+        return read_data_routed_for_main_reference_pair(data, size);
     }
 
     auto ret = esp_codec_dev_read(get_codec_handle(handles_), data, size);
@@ -240,13 +281,17 @@ bool AudioCodecRecorderImpl::set_channel_gains_internal(const std::map<uint8_t, 
 
     for (const auto &[channel, gain] : gains) {
         uint16_t channel_mask = 1UL << channel;
-        if (use_rymcu_bigsmart_audio_route()) {
+        if (use_main_reference_audio_route()) {
             switch (channel) {
             case 0:
-                channel_mask = ESP_CODEC_DEV_MAKE_CHANNEL_MASK(1); // MIC2 main
+                channel_mask = ESP_CODEC_DEV_MAKE_CHANNEL_MASK(
+                    BROOKESIA_HAL_ADAPTOR_AUDIO_CODEC_RECORDER_MAIN_REFERENCE_ROUTE_MAIN_GAIN_CHANNEL
+                );
                 break;
             case 1:
-                channel_mask = ESP_CODEC_DEV_MAKE_CHANNEL_MASK(2); // MIC3 reference
+                channel_mask = ESP_CODEC_DEV_MAKE_CHANNEL_MASK(
+                    BROOKESIA_HAL_ADAPTOR_AUDIO_CODEC_RECORDER_MAIN_REFERENCE_ROUTE_REFERENCE_GAIN_CHANNEL
+                );
                 break;
             default:
                 BROOKESIA_LOGW("Ignore unsupported routed recorder channel gain: channel(%1%), gain(%2%)", channel, gain);
@@ -263,12 +308,13 @@ bool AudioCodecRecorderImpl::set_channel_gains_internal(const std::map<uint8_t, 
     return true;
 }
 
-bool AudioCodecRecorderImpl::read_data_routed_for_rymcu_bigsmart(uint8_t *data, size_t size)
+bool AudioCodecRecorderImpl::read_data_routed_for_main_reference_pair(uint8_t *data, size_t size)
 {
     BROOKESIA_LOG_TRACE_GUARD_WITH_THIS();
 
-    constexpr size_t output_frame_size = RYMCU_BIGSMART_OUTPUT_CHANNELS * sizeof(int16_t);
-    constexpr size_t raw_frame_size = RYMCU_BIGSMART_RAW_CHANNELS * sizeof(int16_t);
+    const size_t output_frame_size = MAIN_REFERENCE_OUTPUT_FRAME_SAMPLES * sizeof(int16_t);
+    const size_t raw_frame_size =
+        BROOKESIA_HAL_ADAPTOR_AUDIO_CODEC_RECORDER_MAIN_REFERENCE_ROUTE_RAW_CHANNELS * sizeof(int16_t);
 
     BROOKESIA_CHECK_FALSE_RETURN(
         (size % output_frame_size) == 0, false, "Invalid routed capture size: %1%", size
@@ -289,11 +335,16 @@ bool AudioCodecRecorderImpl::read_data_routed_for_rymcu_bigsmart(uint8_t *data, 
     BROOKESIA_CHECK_FALSE_RETURN(ret == ESP_CODEC_DEV_OK, false, "Failed to read routed audio data: %1%", ret);
 
     auto *dest = reinterpret_cast<int16_t *>(data);
-    for (size_t frame = 0, raw_index = 0, out_index = 0; frame < frame_count; ++frame, raw_index += 4, out_index += 2) {
-        // Legacy RYMCU BigSmart TDM slot order:
-        // slot0 = MIC1, slot1 = MIC3(reference), slot2 = MIC2(main), slot3 = MIC4(unused)
-        dest[out_index] = routed_capture_buffer_[raw_index + RYMCU_BIGSMART_FIXED_MAIN_MIC_SLOT];
-        dest[out_index + 1] = routed_capture_buffer_[raw_index + RYMCU_BIGSMART_REFERENCE_MIC_SLOT];
+    for (size_t frame = 0, raw_index = 0, out_index = 0; frame < frame_count;
+            ++frame, raw_index += BROOKESIA_HAL_ADAPTOR_AUDIO_CODEC_RECORDER_MAIN_REFERENCE_ROUTE_RAW_CHANNELS,
+            out_index += MAIN_REFERENCE_OUTPUT_FRAME_SAMPLES) {
+        dest[out_index] = routed_capture_buffer_[
+                              raw_index + BROOKESIA_HAL_ADAPTOR_AUDIO_CODEC_RECORDER_MAIN_REFERENCE_ROUTE_MAIN_SLOT
+                          ];
+        dest[out_index + 1] = routed_capture_buffer_[
+                                  raw_index +
+                                  BROOKESIA_HAL_ADAPTOR_AUDIO_CODEC_RECORDER_MAIN_REFERENCE_ROUTE_REFERENCE_SLOT
+                              ];
     }
 
     return true;
