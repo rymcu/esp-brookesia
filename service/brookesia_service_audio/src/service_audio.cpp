@@ -103,7 +103,8 @@ bool Audio::on_start()
 
     auto [player_name, player_iface] = hal::get_first_interface<hal::AudioCodecPlayerIface>();
     BROOKESIA_CHECK_NULL_RETURN(player_iface, false, "Failed to get audio player interface");
-    BROOKESIA_CHECK_FALSE_RETURN(player_iface->open(get_player_config()), false, "Failed to open audio dac");
+    const auto player_config = get_player_config();
+    BROOKESIA_CHECK_FALSE_RETURN(player_iface->open(player_config), false, "Failed to open audio dac");
     lib_utils::FunctionGuard close_player_guard([this, player_iface]() {
         BROOKESIA_LOG_TRACE_GUARD_WITH_THIS();
         player_iface->close();
@@ -155,8 +156,11 @@ bool Audio::on_start()
         },
         .mic_layout = {0},
         .board_sample_rate = static_cast<int>(recorder_info.sample_rate),
-        .board_bits = static_cast<int>(recorder_info.bits),
-        .board_channels = static_cast<int>(recorder_info.channels),
+        // The audio manager output/mixer path must follow the DAC playback format.
+        // For rymcu_bigsmart the recorder is intentionally repacked to 16-bit for AEC,
+        // while the shared playback side still runs in 32-bit stereo.
+        .board_bits = static_cast<int>(player_config.bits),
+        .board_channels = static_cast<int>(player_config.channels),
     };
     // Copy mic_layout string safely
     if (!recorder_info.mic_layout.empty()) {
