@@ -86,6 +86,7 @@ extern "C" void app_main(void)
         GeneralServices::get_instance().init(backend_scheduler);
         GeneralServices::get_instance().start_nvs();
         GeneralServices::get_instance().start_sntp();
+        GeneralServices::get_instance().start_battery();
 
         /* Initialize AI agents */
         AI_Agents::get_instance().init({
