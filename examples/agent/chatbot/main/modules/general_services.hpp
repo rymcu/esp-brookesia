@@ -25,6 +25,7 @@ public:
     }
 
     void start_sntp();
+    void start_battery();
     void start_nvs();
 
 private:
