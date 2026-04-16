@@ -64,7 +64,7 @@ private:
         return {
             .name = BROOKESIA_DESCRIBE_ENUM_TO_STR(FunctionId::GetStatus),
             .description = (boost::format("Get current battery status. Return type: JSON object. Example: %1%")
-            % BROOKESIA_DESCRIBE_JSON_SERIALIZE(get_status_example())).str(),
+                            % BROOKESIA_DESCRIBE_JSON_SERIALIZE(get_status_example())).str(),
             .require_scheduler = false,
         };
     }

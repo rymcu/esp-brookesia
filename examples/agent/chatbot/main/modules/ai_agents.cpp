@@ -255,8 +255,8 @@ void AI_Agents::init_xiaozhi()
         .schema = {
             .name = "Device.GetStatus",
             .description =
-                "Get the current device status (设备当前状态), including speaker volume, screen brightness, "
-                "and battery status when available. Use this tool first for questions like 当前状态、音量多少、亮度多少、电量多少.",
+            "Get the current device status (设备当前状态), including speaker volume, screen brightness, "
+            "and battery status when available. Use this tool first for questions like 当前状态、音量多少、亮度多少、电量多少.",
         },
         .callback = +[](service::FunctionParameterMap &&)
         {
@@ -269,10 +269,10 @@ void AI_Agents::init_xiaozhi()
             .schema = {
                 .name = "Battery.GetStatus",
                 .description =
-                    "Get current battery status (电量 / 电池百分比 / 剩余电量 / 是否充电). "
-                    "Use this tool whenever the user asks about battery level, remaining power, or charging state. "
-                    "Do not use volume or brightness tools for battery questions. "
-                    "Return object fields: level, charging, discharging, voltage_mv.",
+                "Get current battery status (电量 / 电池百分比 / 剩余电量 / 是否充电). "
+                "Use this tool whenever the user asks about battery level, remaining power, or charging state. "
+                "Do not use volume or brightness tools for battery questions. "
+                "Return object fields: level, charging, discharging, voltage_mv.",
             },
             .callback = +[](service::FunctionParameterMap &&)
             {
