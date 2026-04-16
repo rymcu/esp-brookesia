@@ -38,7 +38,7 @@ peripherals:
       unit_id: ADC_UNIT_1
       atten: ADC_ATTEN_DB_12
       bit_width: ADC_BITWIDTH_DEFAULT
-      channel_id: 2   # GPIO10: charging detect when voltage drops below ~0.7V
+      channel_id: 2   # GPIO10: charging detect when voltage drops below ~1.0V
       clk_src: ADC_RTC_CLK_SRC_DEFAULT
       ulp_mode: ADC_ULP_MODE_DISABLE
 
