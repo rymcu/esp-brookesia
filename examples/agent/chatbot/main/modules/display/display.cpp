@@ -357,12 +357,29 @@ bool Display::start_expression_emote(int core_id)
         EmoteHelper::AssetSource source{
             .source = ASSETS_PARTITION_NAME,
             .type = EmoteHelper::AssetSourceType::PartitionLabel,
-            .flag_enable_mmap = false,
+            .flag_enable_mmap = true,
         };
-        auto result = EmoteHelper::call_function_sync(
-                          EmoteHelper::FunctionId::LoadAssetsSource, BROOKESIA_DESCRIBE_TO_JSON(source).as_object()
-                      );
-        BROOKESIA_CHECK_FALSE_RETURN(result.has_value(), false, "Failed to load emote assets: %1%", result.error());
+        bool load_assets_ok = false;
+        std::string load_assets_error;
+
+        // Flash mmap temporarily freezes caches, so perform the load on an
+        // internal stack even when the caller normally runs from PSRAM.
+        BROOKESIA_THREAD_CONFIG_GUARD({
+            .stack_size = 10 * 1024,
+            .stack_in_ext = false,
+        });
+        boost::thread([&]() {
+            auto result = EmoteHelper::call_function_sync(
+                              EmoteHelper::FunctionId::LoadAssetsSource, BROOKESIA_DESCRIBE_TO_JSON(source).as_object()
+                          );
+            if (!result.has_value()) {
+                load_assets_error = result.error();
+                return;
+            }
+            load_assets_ok = true;
+        }).join();
+
+        BROOKESIA_CHECK_FALSE_RETURN(load_assets_ok, false, "Failed to load emote assets: %1%", load_assets_error);
     }
 
     // Set idle event message
