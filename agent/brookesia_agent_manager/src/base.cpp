@@ -303,6 +303,32 @@ bool Base::feed_audio_decoder_data(const uint8_t *data, size_t data_size)
     return true;
 }
 
+bool Base::set_decoder_config(const AudioHelper::DecoderDynamicConfig &decoder_config, bool restart_if_started)
+{
+    BROOKESIA_LOG_TRACE_GUARD_WITH_THIS();
+
+    if (!is_decoder_started()) {
+        audio_config_.decoder = decoder_config;
+        return true;
+    }
+
+    BROOKESIA_CHECK_FALSE_RETURN(restart_if_started, false, "Decoder is running");
+
+    auto previous_decoder_config = audio_config_.decoder;
+    stop_audio_decoder();
+    audio_config_.decoder = decoder_config;
+
+    if (start_audio_decoder()) {
+        return true;
+    }
+
+    BROOKESIA_LOGW("Failed to restart decoder with updated config, restoring previous config");
+    audio_config_.decoder = previous_decoder_config;
+    BROOKESIA_CHECK_FALSE_RETURN(start_audio_decoder(), false, "Failed to restore previous decoder config");
+
+    return false;
+}
+
 bool Base::on_start()
 {
     BROOKESIA_LOG_TRACE_GUARD_WITH_THIS();
@@ -364,14 +390,19 @@ bool Base::do_start()
 {
     BROOKESIA_LOG_TRACE_GUARD_WITH_THIS();
 
-    // Start the audio decoder
-    BROOKESIA_CHECK_FALSE_RETURN(
-        start_audio_decoder(), false, "Failed to start audio decoder"
-    );
-    lib_utils::FunctionGuard stop_decoder_guard([this]() {
+    bool decoder_started = false;
+    lib_utils::FunctionGuard stop_decoder_guard([this, &decoder_started]() {
         BROOKESIA_LOG_TRACE_GUARD_WITH_THIS();
-        stop_audio_decoder();
+        if (decoder_started) {
+            stop_audio_decoder();
+        }
     });
+    if (should_eager_start_audio_decoder()) {
+        BROOKESIA_CHECK_FALSE_RETURN(
+            start_audio_decoder(), false, "Failed to start audio decoder"
+        );
+        decoder_started = true;
+    }
 
     // Start the encoder
     if (get_chat_mode() == ChatMode::Manual) {
@@ -593,14 +624,19 @@ bool Base::do_resume()
         return true;
     }
 
-    // Start the audio decoder
-    BROOKESIA_CHECK_FALSE_RETURN(
-        start_audio_decoder(), false, "Failed to start audio decoder"
-    );
-    lib_utils::FunctionGuard stop_decoder_guard([this]() {
+    bool decoder_started = false;
+    lib_utils::FunctionGuard stop_decoder_guard([this, &decoder_started]() {
         BROOKESIA_LOG_TRACE_GUARD_WITH_THIS();
-        stop_audio_decoder();
+        if (decoder_started) {
+            stop_audio_decoder();
+        }
     });
+    if (should_eager_start_audio_decoder()) {
+        BROOKESIA_CHECK_FALSE_RETURN(
+            start_audio_decoder(), false, "Failed to start audio decoder"
+        );
+        decoder_started = true;
+    }
 
     // Start the encoder
     BROOKESIA_CHECK_FALSE_RETURN(

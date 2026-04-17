@@ -296,6 +296,18 @@ esp_err_t esp_xiaozhi_chat_open_audio_channel(esp_xiaozhi_chat_handle_t chat_hd,
 esp_err_t esp_xiaozhi_chat_close_audio_channel(esp_xiaozhi_chat_handle_t chat_hd);
 
 /**
+ * @brief  Get the negotiated audio parameters for the current audio channel
+ *
+ * @param[in]  chat_hd  Handle to the chat instance
+ * @param[out] audio    Negotiated audio parameters filled by the transport layer
+ *
+ * @return
+ *       - ESP_OK   On success
+ *       - ESP_ERR_INVALID_ARG   Invalid handle or output pointer
+ */
+esp_err_t esp_xiaozhi_chat_get_audio_params(esp_xiaozhi_chat_handle_t chat_hd, esp_xiaozhi_chat_audio_t *audio);
+
+/**
  * @brief  Send audio data to the chat session
  *
  * @param[in]  chat_hd   Handle to the chat instance

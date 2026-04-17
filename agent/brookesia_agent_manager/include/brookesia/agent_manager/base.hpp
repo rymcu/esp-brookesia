@@ -110,6 +110,21 @@ public:
     {
         return audio_config_;
     }
+    /**
+     * @brief Override the audio configuration before the agent starts running.
+     *
+     * @param[in] audio_config Replacement encoder/decoder configuration.
+     * @return true if the configuration was updated, false if the agent is already running.
+     */
+    bool set_audio_config(const AudioConfig &audio_config)
+    {
+        if (is_running()) {
+            return false;
+        }
+
+        audio_config_ = audio_config;
+        return true;
+    }
 
 protected:
     /**
@@ -213,6 +228,18 @@ protected:
         return true;
     }
     /**
+     * @brief Optional hook that decides whether the decoder should start before the agent finishes startup.
+     *
+     * Agents that negotiate downlink codec parameters at runtime can return false and
+     * start the decoder later with the negotiated settings.
+     *
+     * @return true to eagerly start the decoder during start/resume, false to defer it.
+     */
+    virtual bool should_eager_start_audio_decoder() const
+    {
+        return true;
+    }
+    /**
      * @brief Optional hook invoked when speech playback should be interrupted.
      *
      * @return true if interruption is supported and succeeds.
@@ -289,6 +316,15 @@ protected:
     void trigger_general_event(GeneralEvent event);
 
     bool feed_audio_decoder_data(const uint8_t *data, size_t data_size);
+    bool set_decoder_config(
+        const service::helper::Audio::DecoderDynamicConfig &decoder_config, bool restart_if_started = false
+    );
+    bool start_audio_decoder();
+    void stop_audio_decoder();
+    bool is_decoder_started() const
+    {
+        return is_decoder_started_;
+    }
 
     bool is_general_action_running(GeneralAction action);
 
@@ -320,13 +356,6 @@ private:
     bool do_interrupt_speaking();
     bool do_manual_start_listening();
     bool do_manual_stop_listening();
-
-    bool start_audio_decoder();
-    void stop_audio_decoder();
-    bool is_decoder_started() const
-    {
-        return is_decoder_started_;
-    }
 
     bool start_audio_encoder();
     void stop_audio_encoder();

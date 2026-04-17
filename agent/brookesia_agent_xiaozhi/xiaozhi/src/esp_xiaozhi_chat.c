@@ -99,6 +99,7 @@ typedef struct {
 
     char session_id[ESP_XIAOZHI_CHAT_MAX_STRING_SIZE];  /*!< Session ID */
     int server_sample_rate;                             /*!< Server sample rate */
+    int server_channels;                                /*!< Server channel count */
     int server_frame_duration;                          /*!< Server frame duration */
 
     esp_xiaozhi_chat_audio_type_t       audio_type;     /*!< Audio type */
@@ -281,10 +282,20 @@ static esp_err_t esp_xiaozhi_chat_hello_handler(esp_xiaozhi_chat_t *xiaozhi_chat
             xiaozhi_chat->server_sample_rate = sample_rate->valueint;
         }
 
+        const cJSON *channels = cJSON_GetObjectItem(audio_params, "channels");
+        if (cJSON_IsNumber(channels)) {
+            xiaozhi_chat->server_channels = channels->valueint;
+        }
+
         const cJSON *frame_duration = cJSON_GetObjectItem(audio_params, "frame_duration");
         if (cJSON_IsNumber(frame_duration)) {
             xiaozhi_chat->server_frame_duration = frame_duration->valueint;
         }
+
+        ESP_LOGI(
+            TAG, "Server audio params: %d Hz, %d channels, %d ms",
+            xiaozhi_chat->server_sample_rate, xiaozhi_chat->server_channels, xiaozhi_chat->server_frame_duration
+        );
     }
 
     if (strcmp(transport->valuestring, "udp") == 0) {
@@ -1300,6 +1311,9 @@ esp_err_t esp_xiaozhi_chat_open_audio_channel(esp_xiaozhi_chat_handle_t chat_hd,
 
     xiaozhi_chat->error_occurred = false;
     memset(xiaozhi_chat->session_id, 0, sizeof(xiaozhi_chat->session_id));
+    xiaozhi_chat->server_sample_rate = (audio && audio->sample_rate > 0) ? audio->sample_rate : 16000;
+    xiaozhi_chat->server_channels = (audio && audio->channels > 0) ? audio->channels : 1;
+    xiaozhi_chat->server_frame_duration = (audio && audio->frame_duration > 0) ? audio->frame_duration : 60;
     xEventGroupClearBits(xiaozhi_chat->event_group_handle, ESP_XIAOZHI_CHAT_SERVER_HELLO);
 
     ret = esp_xiaozhi_transport_send_text(xiaozhi_chat->mcp_chat_handle, message);
@@ -1317,6 +1331,22 @@ esp_err_t esp_xiaozhi_chat_open_audio_channel(esp_xiaozhi_chat_handle_t chat_hd,
     ESP_RETURN_ON_ERROR(ret, TAG, "Failed to open audio %s", esp_err_to_name(ret));
 
     esp_event_post(ESP_XIAOZHI_CHAT_EVENTS, ESP_XIAOZHI_CHAT_EVENT_AUDIO_CHANNEL_OPENED, NULL, 0, portMAX_DELAY);
+
+    return ESP_OK;
+}
+
+esp_err_t esp_xiaozhi_chat_get_audio_params(esp_xiaozhi_chat_handle_t chat_hd, esp_xiaozhi_chat_audio_t *audio)
+{
+    ESP_RETURN_ON_FALSE(chat_hd, ESP_ERR_INVALID_ARG, TAG, "Invalid handle");
+    ESP_RETURN_ON_FALSE(audio, ESP_ERR_INVALID_ARG, TAG, "Invalid audio output");
+
+    esp_xiaozhi_chat_t *xiaozhi_chat = (esp_xiaozhi_chat_t *)chat_hd;
+    *audio = (esp_xiaozhi_chat_audio_t) {
+        .format = "opus",
+        .sample_rate = xiaozhi_chat->server_sample_rate,
+        .channels = xiaozhi_chat->server_channels,
+        .frame_duration = xiaozhi_chat->server_frame_duration,
+    };
 
     return ESP_OK;
 }

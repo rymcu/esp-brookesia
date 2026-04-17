@@ -158,6 +158,10 @@ private:
     bool on_sleep() override;
     bool on_wakeup() override;
     void on_shutdown() override;
+    bool should_eager_start_audio_decoder() const override
+    {
+        return false;
+    }
     bool on_interrupt_speaking() override;
     bool on_manual_start_listening() override;
     bool on_manual_stop_listening() override;
@@ -198,6 +202,10 @@ private:
     bool on_agent_event(int32_t event_id);
     bool on_chat_data(const uint8_t *data, size_t len);
     bool on_chat_event(uint8_t event, void *event_data);
+    bool sync_decoder_config_with_server_audio_params();
+    bool schedule_open_audio_channel(
+        uint32_t delay_ms, bool stop_agent_on_failure, uint8_t retry_count, bool send_wake_word_after_open
+    );
 
     /**
      * @brief Replace the cached chat transport capabilities.
@@ -218,6 +226,8 @@ private:
     bool is_xiaozhi_initialized_ = false;
     bool is_xiaozhi_started_ = false;
     std::atomic<bool> is_xiaozhi_audio_channel_opened_ = false;
+    std::atomic<bool> is_xiaozhi_audio_channel_closing_for_sleep_ = false;
+    std::atomic<bool> send_wake_word_on_next_audio_channel_open_ = false;
 
     uint32_t chat_handle_ = 0;
     esp_event_handler_instance_t agent_event_instance_ = nullptr;
