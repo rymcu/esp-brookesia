@@ -7,6 +7,7 @@
 #include "brookesia/service_manager.hpp"
 #include "brookesia/service_helper.hpp"
 #include "brookesia/agent_helper.hpp"
+#include "brookesia/agent_xiaozhi/agent_xiaozhi.hpp"
 #include "brookesia/mcp_utils/mcp_utils.hpp"
 #include "brookesia/hal_interface.hpp"
 #include "private/utils.hpp"
@@ -18,6 +19,7 @@ using AgentHelper = esp_brookesia::agent::helper::Manager;
 using CozeHelper = esp_brookesia::agent::helper::Coze;
 using OpenaiHelper = esp_brookesia::agent::helper::Openai;
 using XiaoZhiHelper = esp_brookesia::agent::helper::XiaoZhi;
+using XiaoZhiAgent = esp_brookesia::agent::XiaoZhi;
 using EmoteHelper = esp_brookesia::service::helper::ExpressionEmote;
 using AudioHelper = esp_brookesia::service::helper::Audio;
 using BatteryHelper = esp_brookesia::service::helper::Battery;
@@ -27,6 +29,8 @@ using WifiHelper = esp_brookesia::service::helper::Wifi;
 
 constexpr const char *AUDIO_WAKEUP_WORD_MODEL_PARTITION_LABEL = "model";
 constexpr const char *AUDIO_WAKEUP_WORD_MN_LANGUAGE = "cn";
+constexpr uint8_t XIAO_ZHI_DECODER_FRAME_DURATION_MS = 20;
+constexpr size_t OPUS_DECODER_FEEDER_STACK_SIZE = 40 * 1024;
 
 #if CONFIG_EXAMPLE_AGENTS_ENABLE_COZE
 extern const char coze_private_key_pem_start[] asm("_binary_private_key_pem_start");
@@ -113,6 +117,24 @@ bool AI_Agents::init(const Config &config)
                               AudioHelper::FunctionId::SetAFE_Config, BROOKESIA_DESCRIBE_TO_JSON(afe_config).as_object()
                           );
     BROOKESIA_CHECK_FALSE_RETURN(set_afe_result, false, "Failed to set audio AFE config: %1%", set_afe_result.error());
+
+    AudioHelper::DecoderStaticConfig decoder_static_config{};
+    decoder_static_config.feeder_task.name = "DecoderFeeder";
+    decoder_static_config.feeder_task.stack_size = OPUS_DECODER_FEEDER_STACK_SIZE;
+    auto set_decoder_static_result = AudioHelper::call_function_sync(
+                                         AudioHelper::FunctionId::SetDecoderStaticConfig,
+                                         BROOKESIA_DESCRIBE_TO_JSON(decoder_static_config).as_object()
+                                     );
+    BROOKESIA_CHECK_FALSE_RETURN(
+        set_decoder_static_result,
+        false,
+        "Failed to set audio decoder static config: %1%",
+        set_decoder_static_result.error()
+    );
+    BROOKESIA_LOGI(
+        "Configured decoder feeder task stack to %1% bytes in external memory",
+        decoder_static_config.feeder_task.stack_size
+    );
 
     task_scheduler_ = config.task_scheduler;
     emote_animation_duration_ms_ = config.emote_animation_duration_ms;
@@ -233,6 +255,16 @@ void AI_Agents::init_xiaozhi()
 #if !CONFIG_EXAMPLE_AGENTS_ENABLE_XIAOZHI
     BROOKESIA_LOGW("XiaoZhi agent is not enabled, skip initialization");
 #else
+    auto xiaozhi_audio_config = XiaoZhiAgent::DEFAULT_AUDIO_CONFIG;
+    xiaozhi_audio_config.decoder.general.frame_duration = XIAO_ZHI_DECODER_FRAME_DURATION_MS;
+    BROOKESIA_CHECK_FALSE_EXIT(
+        XiaoZhiAgent::get_instance().set_audio_config(xiaozhi_audio_config),
+        "Failed to override XiaoZhi audio config"
+    );
+    BROOKESIA_LOGI(
+        "Configured XiaoZhi downlink OPUS frame duration to %1% ms for lower playback memory pressure",
+        XIAO_ZHI_DECODER_FRAME_DURATION_MS
+    );
 
     std::vector<AudioHelper::FunctionId> audio_functions = {
         AudioHelper::FunctionId::SetVolume,

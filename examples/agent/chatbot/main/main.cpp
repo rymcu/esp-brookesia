@@ -70,12 +70,14 @@ extern "C" void app_main(void)
                 .core_id = 0,
                 .priority = 1,
                 .stack_size = 10 * 1024,
+                .stack_in_ext = true,
             },
             {
                 .name = "BackendWorker2",
                 .core_id = 1,
                 .priority = 1,
                 .stack_size = 10 * 1024,
+                .stack_in_ext = true,
             },
         }
     });
