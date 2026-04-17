@@ -29,7 +29,7 @@ using WifiHelper = esp_brookesia::service::helper::Wifi;
 
 constexpr const char *AUDIO_WAKEUP_WORD_MODEL_PARTITION_LABEL = "model";
 constexpr const char *AUDIO_WAKEUP_WORD_MN_LANGUAGE = "cn";
-constexpr uint8_t XIAO_ZHI_DECODER_FRAME_DURATION_MS = 20;
+constexpr uint8_t XIAO_ZHI_OPUS_FRAME_DURATION_MS = 20;
 constexpr size_t OPUS_DECODER_FEEDER_STACK_SIZE = 40 * 1024;
 
 #if CONFIG_EXAMPLE_AGENTS_ENABLE_COZE
@@ -256,14 +256,15 @@ void AI_Agents::init_xiaozhi()
     BROOKESIA_LOGW("XiaoZhi agent is not enabled, skip initialization");
 #else
     auto xiaozhi_audio_config = XiaoZhiAgent::DEFAULT_AUDIO_CONFIG;
-    xiaozhi_audio_config.decoder.general.frame_duration = XIAO_ZHI_DECODER_FRAME_DURATION_MS;
+    xiaozhi_audio_config.encoder.general.frame_duration = XIAO_ZHI_OPUS_FRAME_DURATION_MS;
+    xiaozhi_audio_config.decoder.general.frame_duration = XIAO_ZHI_OPUS_FRAME_DURATION_MS;
     BROOKESIA_CHECK_FALSE_EXIT(
         XiaoZhiAgent::get_instance().set_audio_config(xiaozhi_audio_config),
         "Failed to override XiaoZhi audio config"
     );
     BROOKESIA_LOGI(
-        "Configured XiaoZhi downlink OPUS frame duration to %1% ms for lower playback memory pressure",
-        XIAO_ZHI_DECODER_FRAME_DURATION_MS
+        "Configured XiaoZhi uplink/downlink OPUS frame duration to %1% ms to keep negotiated audio params aligned",
+        XIAO_ZHI_OPUS_FRAME_DURATION_MS
     );
 
     std::vector<AudioHelper::FunctionId> audio_functions = {
