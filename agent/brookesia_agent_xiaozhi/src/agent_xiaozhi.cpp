@@ -28,11 +28,40 @@ using NVS_Helper = service::helper::NVS;
 
 constexpr uint32_t INTERRUPTED_SPEAKING_RESET_DELAY_MS = 1000;
 constexpr uint32_t OPEN_AUDIO_CHANNEL_DELAY_MS = 5000;
+constexpr uint32_t RECOVER_AUDIO_CHANNEL_DELAY_MS = 1000;
+constexpr uint8_t RECOVER_AUDIO_CHANNEL_RETRY_COUNT = 2;
 
 namespace {
 static uint32_t keystore_nvs_handle_counter = 0;
 static std::map<uint32_t, std::string> keystore_nvs_nspace_map;
 static std::string keystore_nvs_nspace;
+
+const char *get_chat_audio_format_str(AudioHelper::CodecFormat format)
+{
+    switch (format) {
+    case AudioHelper::CodecFormat::OPUS:
+        return "opus";
+    case AudioHelper::CodecFormat::G711A:
+        return "g711a";
+    default:
+        return "pcm";
+    }
+}
+
+esp_xiaozhi_chat_audio_t make_chat_audio_config(const AudioHelper::DecoderDynamicConfig &decoder_config)
+{
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmissing-field-initializers"
+    esp_xiaozhi_chat_audio_t chat_audio = {
+        .format = get_chat_audio_format_str(decoder_config.type),
+        .sample_rate = static_cast<int>(decoder_config.general.sample_rate),
+        .channels = static_cast<int>(decoder_config.general.channels),
+        .frame_duration = static_cast<int>(decoder_config.general.frame_duration),
+    };
+#pragma GCC diagnostic pop
+
+    return chat_audio;
+}
 
 nvs_handle_t get_keystore_nvs_handle_by_nspace(std::string nspace)
 {
@@ -539,6 +568,8 @@ void XiaoZhi::on_shutdown()
     }
     chat_handle_ = 0;
     is_xiaozhi_audio_channel_opened_ = false;
+    is_xiaozhi_audio_channel_closing_for_sleep_ = false;
+    send_wake_word_on_next_audio_channel_open_ = false;
 
     trigger_general_event(GeneralEvent::Stopped);
 }
@@ -587,8 +618,22 @@ bool XiaoZhi::on_sleep()
 {
     BROOKESIA_LOG_TRACE_GUARD_WITH_THIS();
 
+    is_xiaozhi_audio_channel_closing_for_sleep_.store(true);
+
+    auto task_scheduler = get_task_scheduler();
+    if ((open_audio_channel_task_ != 0) && task_scheduler) {
+        BROOKESIA_LOGI(
+            "Cancel pending audio channel task[%1%] before sleeping", open_audio_channel_task_
+        );
+        task_scheduler->cancel(open_audio_channel_task_);
+        open_audio_channel_task_ = 0;
+    }
+
     auto ret = esp_xiaozhi_chat_close_audio_channel(chat_handle_);
-    BROOKESIA_CHECK_ESP_ERR_RETURN(ret, false, "Failed to close audio channel");
+    if (ret != ESP_OK) {
+        is_xiaozhi_audio_channel_closing_for_sleep_.store(false);
+        BROOKESIA_CHECK_ESP_ERR_RETURN(ret, false, "Failed to close audio channel");
+    }
 
     return true;
 }
@@ -597,7 +642,21 @@ bool XiaoZhi::on_wakeup()
 {
     BROOKESIA_LOG_TRACE_GUARD_WITH_THIS();
 
-    auto ret = esp_xiaozhi_chat_open_audio_channel(chat_handle_, nullptr, nullptr, 0);
+    is_xiaozhi_audio_channel_closing_for_sleep_.store(false);
+    send_wake_word_on_next_audio_channel_open_.store(true);
+
+    auto task_scheduler = get_task_scheduler();
+    if ((open_audio_channel_task_ != 0) && task_scheduler) {
+        BROOKESIA_LOGI(
+            "Cancel stale audio channel task[%1%] before wakeup", open_audio_channel_task_
+        );
+        task_scheduler->cancel(open_audio_channel_task_);
+        open_audio_channel_task_ = 0;
+    }
+
+    auto chat_audio = make_chat_audio_config(get_audio_config().decoder);
+
+    auto ret = esp_xiaozhi_chat_open_audio_channel(chat_handle_, &chat_audio, nullptr, 0);
     BROOKESIA_CHECK_ESP_ERR_RETURN(ret, false, "Failed to open audio channel");
 
     return true;
@@ -616,6 +675,129 @@ bool XiaoZhi::on_encoder_data_ready(const uint8_t *data, size_t data_size)
 
     auto ret = esp_xiaozhi_chat_send_audio_data(chat_handle_, reinterpret_cast<const char *>(data), data_size);
     BROOKESIA_CHECK_ESP_ERR_RETURN(ret, false, "Failed to send audio data");
+
+    return true;
+}
+
+bool XiaoZhi::sync_decoder_config_with_server_audio_params()
+{
+    BROOKESIA_LOG_TRACE_GUARD_WITH_THIS();
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmissing-field-initializers"
+    esp_xiaozhi_chat_audio_t negotiated_audio = {};
+#pragma GCC diagnostic pop
+    auto ret = esp_xiaozhi_chat_get_audio_params(chat_handle_, &negotiated_audio);
+    BROOKESIA_CHECK_ESP_ERR_RETURN(ret, false, "Failed to get negotiated audio params");
+
+    auto decoder_config = get_audio_config().decoder;
+    if (negotiated_audio.sample_rate > 0) {
+        decoder_config.general.sample_rate = static_cast<uint32_t>(negotiated_audio.sample_rate);
+    }
+    if (negotiated_audio.channels > 0) {
+        decoder_config.general.channels = static_cast<uint8_t>(negotiated_audio.channels);
+    }
+    if (negotiated_audio.frame_duration > 0) {
+        decoder_config.general.frame_duration = static_cast<uint8_t>(negotiated_audio.frame_duration);
+    }
+
+    BROOKESIA_LOGI(
+        "Negotiated downlink audio params: %1% Hz, %2% channels, %3% ms",
+        decoder_config.general.sample_rate, decoder_config.general.channels, decoder_config.general.frame_duration
+    );
+
+    BROOKESIA_CHECK_FALSE_RETURN(
+        set_decoder_config(decoder_config, is_decoder_started()), false, "Failed to sync decoder config"
+    );
+
+    if (!is_decoder_started()) {
+        BROOKESIA_CHECK_FALSE_RETURN(start_audio_decoder(), false, "Failed to start audio decoder");
+    }
+
+    return true;
+}
+
+bool XiaoZhi::schedule_open_audio_channel(
+    uint32_t delay_ms, bool stop_agent_on_failure, uint8_t retry_count, bool send_wake_word_after_open
+)
+{
+    BROOKESIA_LOG_TRACE_GUARD_WITH_THIS();
+
+    if (open_audio_channel_task_ != 0) {
+        BROOKESIA_LOGW("Audio channel task[%1%] is already pending, skip reschedule", open_audio_channel_task_);
+        return true;
+    }
+
+    auto scheduler = get_task_scheduler();
+    BROOKESIA_CHECK_NULL_RETURN(scheduler, false, "Scheduler is not available");
+
+    auto group = get_state_task_group();
+    auto open_audio_channel_func = [this, delay_ms, stop_agent_on_failure, retry_count, send_wake_word_after_open]() {
+        BROOKESIA_LOG_TRACE_GUARD_WITH_THIS();
+
+        auto task_id = open_audio_channel_task_;
+        open_audio_channel_task_ = 0;
+
+        if (!is_xiaozhi_started()) {
+            BROOKESIA_LOGW("XiaoZhi is not started, skip audio channel task[%1%]", task_id);
+            return;
+        }
+        if (is_general_action_running(GeneralAction::Stop) || is_general_action_running(GeneralAction::Sleep)) {
+            BROOKESIA_LOGI("Agent is stopping or sleeping, skip audio channel task[%1%]", task_id);
+            return;
+        }
+        if (is_xiaozhi_audio_channel_opened()) {
+            BROOKESIA_LOGI("Audio channel is already opened before task[%1%], skip", task_id);
+            return;
+        }
+
+        auto chat_audio = make_chat_audio_config(get_audio_config().decoder);
+        send_wake_word_on_next_audio_channel_open_.store(send_wake_word_after_open);
+        BROOKESIA_LOGI(
+            "Opening audio channel in %1% mode after %2% ms delay (task[%3%], retries left: %4%, send wake word: %5%)",
+            stop_agent_on_failure ? "startup" : "recovery", delay_ms, task_id, retry_count, send_wake_word_after_open
+        );
+
+        auto ret = esp_xiaozhi_chat_open_audio_channel(chat_handle_, &chat_audio, nullptr, 0);
+        if (ret == ESP_OK) {
+            return;
+        }
+
+        BROOKESIA_LOGW("Failed to open audio channel in task[%1%], ret(%2%)", task_id, static_cast<int>(ret));
+
+        if (retry_count > 0) {
+            BROOKESIA_LOGW(
+                "Retry audio channel reopen in %1% ms (%2% retries remaining after reschedule)",
+                RECOVER_AUDIO_CHANNEL_DELAY_MS, retry_count - 1
+            );
+            if (!schedule_open_audio_channel(
+                    RECOVER_AUDIO_CHANNEL_DELAY_MS, stop_agent_on_failure, retry_count - 1, send_wake_word_after_open
+                )) {
+                BROOKESIA_LOGE("Failed to schedule retry for audio channel reopen");
+                if (stop_agent_on_failure) {
+                    trigger_general_event(GeneralEvent::Stopped);
+                }
+            }
+            return;
+        }
+
+        if (stop_agent_on_failure) {
+            BROOKESIA_LOGE("Failed to open audio channel during startup, stop agent");
+            send_wake_word_on_next_audio_channel_open_.store(false);
+            trigger_general_event(GeneralEvent::Stopped);
+            return;
+        }
+
+        send_wake_word_on_next_audio_channel_open_.store(false);
+        BROOKESIA_LOGW("Failed to recover audio channel, keep agent running and wait for next recovery chance");
+    };
+    auto result = scheduler->post_delayed(open_audio_channel_func, delay_ms, &open_audio_channel_task_, group);
+    BROOKESIA_CHECK_FALSE_RETURN(result, false, "Failed to post open audio channel task");
+
+    BROOKESIA_LOGI(
+        "Scheduled audio channel %1% task[%2%] after %3% ms",
+        stop_agent_on_failure ? "startup" : "recovery", open_audio_channel_task_, delay_ms
+    );
 
     return true;
 }
@@ -643,6 +825,7 @@ bool XiaoZhi::on_agent_event(int32_t event_id)
     switch (event_id) {
     case ESP_XIAOZHI_CHAT_EVENT_CONNECTED: {
         BROOKESIA_LOGI("connected");
+        is_xiaozhi_audio_channel_closing_for_sleep_.store(false);
         task_func = [this]() {
             BROOKESIA_LOG_TRACE_GUARD_WITH_THIS();
 
@@ -655,65 +838,17 @@ bool XiaoZhi::on_agent_event(int32_t event_id)
             // Trigger general event to start agent
             trigger_general_event(GeneralEvent::Started);
 
-            if (open_audio_channel_task_ != 0) {
-                BROOKESIA_LOGW("Open audio channel task is already running, skip");
-                return;
-            }
-
-            // Open audio channel
-            // Delay to ensure the audio channel is opened after the agent is started
-            // Otherwise, the MCP tools may not be available in first chat
-            auto open_audio_channel_func = [this]() {
-                BROOKESIA_LOG_TRACE_GUARD_WITH_THIS();
-
-                // Skip if XiaoZhi is stopped
-                if (!is_xiaozhi_started()) {
-                    BROOKESIA_LOGW("XiaoZhi is not started, skip");
-                    return;
-                }
-
-                open_audio_channel_task_ = 0;
-
-                auto get_format_str = [](AudioHelper::CodecFormat format) {
-                    switch (format) {
-                    case AudioHelper::CodecFormat::OPUS:
-                        return "opus";
-                    case AudioHelper::CodecFormat::G711A:
-                        return "g711a";
-                    default:
-                        return "pcm";
-                    }
-                };
-                auto &audio_config = get_audio_config();
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wmissing-field-initializers"
-                esp_xiaozhi_chat_audio_t chat_audio = {
-                    .format = get_format_str(audio_config.decoder.type),
-                    .sample_rate = static_cast<int>(audio_config.decoder.general.sample_rate),
-                    .channels = static_cast<int>(audio_config.decoder.general.channels),
-                    .frame_duration = static_cast<int>(audio_config.decoder.general.frame_duration),
-                };
-#pragma GCC diagnostic pop
-                auto ret = esp_xiaozhi_chat_open_audio_channel(chat_handle_, &chat_audio, nullptr, 0);
-                BROOKESIA_CHECK_ESP_ERR_EXECUTE(ret, {
-                    trigger_general_event(GeneralEvent::Stopped);
-                }, {
-                    BROOKESIA_LOGE("Failed to open audio channel");
-                });
-            };
-            auto scheduler = get_task_scheduler();
-            BROOKESIA_CHECK_NULL_EXIT(scheduler, "Scheduler is not available");
-            auto group = get_state_task_group();
-            auto result = scheduler->post_delayed(
-                              open_audio_channel_func, OPEN_AUDIO_CHANNEL_DELAY_MS, &open_audio_channel_task_, group
-                          );
-            BROOKESIA_CHECK_FALSE_EXIT(result, "Failed to post task function");
+            BROOKESIA_CHECK_FALSE_EXIT(
+                schedule_open_audio_channel(OPEN_AUDIO_CHANNEL_DELAY_MS, true, 0, true),
+                "Failed to schedule startup audio channel task"
+            );
         };
         break;
     }
     case ESP_XIAOZHI_CHAT_EVENT_DISCONNECTED:
         BROOKESIA_LOGI("disconnected");
         is_xiaozhi_audio_channel_opened_.store(false);
+        is_xiaozhi_audio_channel_closing_for_sleep_.store(false);
         task_func = [this]() {
             BROOKESIA_LOG_TRACE_GUARD_WITH_THIS();
             trigger_general_event(GeneralEvent::Stopped);
@@ -722,6 +857,15 @@ bool XiaoZhi::on_agent_event(int32_t event_id)
     case ESP_XIAOZHI_CHAT_EVENT_AUDIO_CHANNEL_OPENED: {
         BROOKESIA_LOGI("audio channel opened");
         is_xiaozhi_audio_channel_opened_.store(true);
+        is_xiaozhi_audio_channel_closing_for_sleep_.store(false);
+        if (!sync_decoder_config_with_server_audio_params()) {
+            BROOKESIA_LOGE("Failed to sync decoder with negotiated audio params");
+            task_func = [this]() {
+                BROOKESIA_LOG_TRACE_GUARD_WITH_THIS();
+                trigger_general_event(GeneralEvent::Stopped);
+            };
+            break;
+        }
         task_func = [this]() {
             BROOKESIA_LOG_TRACE_GUARD_WITH_THIS();
             trigger_general_event(GeneralEvent::Awake);
@@ -739,18 +883,21 @@ bool XiaoZhi::on_agent_event(int32_t event_id)
                 BROOKESIA_LOGE("Failed to start listening");
             });
         }
-        std::string wake_word = BROOKESIA_AGENT_XIAOZHI_WAKE_WORD;
-        if (wake_word.empty()) {
-            auto wake_words = get_wake_words();
-            if (!wake_words.empty()) {
-                wake_word = wake_words[0];
+        bool should_send_wake_word = send_wake_word_on_next_audio_channel_open_.exchange(false);
+        if (should_send_wake_word) {
+            std::string wake_word = BROOKESIA_AGENT_XIAOZHI_WAKE_WORD;
+            if (wake_word.empty()) {
+                auto wake_words = get_wake_words();
+                if (!wake_words.empty()) {
+                    wake_word = wake_words[0];
+                }
             }
-        }
-        if (!wake_word.empty()) {
-            auto ret = esp_xiaozhi_chat_send_wake_word(chat_handle_, wake_word.c_str());
-            BROOKESIA_CHECK_ESP_ERR_EXECUTE(ret, {}, {
-                BROOKESIA_LOGE("Failed to send wake word");
-            });
+            if (!wake_word.empty()) {
+                auto ret = esp_xiaozhi_chat_send_wake_word(chat_handle_, wake_word.c_str());
+                BROOKESIA_CHECK_ESP_ERR_EXECUTE(ret, {}, {
+                    BROOKESIA_LOGE("Failed to send wake word");
+                });
+            }
         }
         break;
     }
@@ -758,9 +905,19 @@ bool XiaoZhi::on_agent_event(int32_t event_id)
         BROOKESIA_LOGI("audio channel closed");
         task_func = [this]() {
             BROOKESIA_LOG_TRACE_GUARD_WITH_THIS();
-            if (is_general_action_running(GeneralAction::Sleep)) {
+            if (is_xiaozhi_audio_channel_closing_for_sleep_.load() ||
+                    is_general_action_running(GeneralAction::Sleep)) {
+                BROOKESIA_LOGI("Audio channel close belongs to sleep teardown, keep sleeping");
                 trigger_general_event(GeneralEvent::Slept);
+                return;
             }
+
+            BROOKESIA_CHECK_FALSE_EXIT(
+                schedule_open_audio_channel(
+                    RECOVER_AUDIO_CHANNEL_DELAY_MS, false, RECOVER_AUDIO_CHANNEL_RETRY_COUNT, false
+                ),
+                "Failed to schedule audio channel recovery after close"
+            );
         };
         is_xiaozhi_audio_channel_opened_.store(false);
         break;
@@ -768,11 +925,24 @@ bool XiaoZhi::on_agent_event(int32_t event_id)
         BROOKESIA_LOGI("audio data incoming");
         break;
     case ESP_XIAOZHI_CHAT_EVENT_SERVER_GOODBYE:
-        BROOKESIA_LOGI("server goodbye");
+        BROOKESIA_LOGW("server goodbye");
         task_func = [this]() {
             BROOKESIA_LOG_TRACE_GUARD_WITH_THIS();
-            trigger_general_event(GeneralEvent::Slept);
+            if (is_xiaozhi_audio_channel_closing_for_sleep_.load() ||
+                    is_general_action_running(GeneralAction::Sleep)) {
+                BROOKESIA_LOGI("Server goodbye belongs to sleep teardown, keep sleeping");
+                trigger_general_event(GeneralEvent::Slept);
+                return;
+            }
+
+            BROOKESIA_CHECK_FALSE_EXIT(
+                schedule_open_audio_channel(
+                    RECOVER_AUDIO_CHANNEL_DELAY_MS, false, RECOVER_AUDIO_CHANNEL_RETRY_COUNT, false
+                ),
+                "Failed to schedule audio channel recovery after server goodbye"
+            );
         };
+        is_xiaozhi_audio_channel_opened_.store(false);
         break;
     default:
         BROOKESIA_LOGW("unknown event: %d", event_id);
