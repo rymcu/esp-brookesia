@@ -4,7 +4,10 @@
 # This file is imported by language-specific conf.py files
 # (for example, docs/en/conf.py and docs/zh_CN/conf.py).
 #
+import importlib
 import os as _os
+
+_os.environ.setdefault("NO_COLOR", "1")
 
 # Base configuration from esp-docs (theme, builders, link roles, etc.).
 from esp_docs.conf_docs import *  # noqa: F403,F401
@@ -13,19 +16,27 @@ from esp_docs.conf_docs import *  # noqa: F403,F401
 extensions += [
     # Add "copy" buttons for code blocks.
     "sphinx_copybutton",
-    # Render WaveDrom diagrams when used in RST.
-    "sphinxcontrib.wavedrom",
     # Render Mermaid diagrams (client-side JS, no mmdc required).
     "sphinxcontrib.mermaid",
     # Keep esp-docs build-system compatibility.
     "esp_docs.esp_extensions.dummy_build_system",
     # Run Doxygen during build and generate inc/*.inc fragments.
-    "esp_docs.esp_extensions.run_doxygen",
+    "run_doxygen",
     # Patch duplicate Breathe output for service_helper/base.hpp (after run_doxygen).
     "doxygen_inc_postprocess",
     # Generate helper-first contract guide fragments.
     "helper_contract_docs",
 ]
+
+# sphinxcontrib-wavedrom pulls in Cairo/XCB dependencies that are not available
+# on all Windows hosts. Enable it only when the Python environment can import
+# it successfully; the current docs do not require WaveDrom during normal builds.
+try:
+    importlib.import_module("sphinxcontrib.wavedrom")
+except Exception:
+    pass
+else:
+    extensions.append("sphinxcontrib.wavedrom")
 
 # Repository metadata used by link roles and page context.
 github_repo = "espressif/esp-brookesia"

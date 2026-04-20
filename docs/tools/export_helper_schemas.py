@@ -62,6 +62,7 @@ def _generate_cpp_source(contracts: list[dict]) -> str:
 
     return textwrap.dedent(
         f"""\
+        #define BOOST_ALL_NO_LIB 1
         #define BOOST_ERROR_CODE_HEADER_ONLY 1
         #define BOOST_JSON_NO_LIB 1
         #include <iostream>
@@ -93,24 +94,60 @@ def _generate_cpp_source(contracts: list[dict]) -> str:
     )
 
 
+def _iter_boost_include_paths(repo_root: Path) -> list[Path]:
+    candidates: list[Path] = []
+
+    for env_var in ("BOOST_INCLUDEDIR", "BOOST_ROOT"):
+        env_value = os.environ.get(env_var, "").strip()
+        if not env_value:
+            continue
+        path = Path(env_value)
+        if env_var == "BOOST_ROOT" and not (path / "boost").exists() and (path / "include" / "boost").exists():
+            path = path / "include"
+        candidates.append(path)
+
+    tools_dir = repo_root / ".tools"
+    if tools_dir.is_dir():
+        for path in sorted(tools_dir.glob("boost_*"), reverse=True):
+            candidates.append(path)
+            include_path = path / "include"
+            if include_path.is_dir():
+                candidates.append(include_path)
+
+    candidates.append(Path("/usr/local/include"))
+
+    include_paths: list[Path] = []
+    seen: set[str] = set()
+    for path in candidates:
+        resolved = path.resolve(strict=False)
+        key = os.path.normcase(str(resolved))
+        if key in seen:
+            continue
+        if (resolved / "boost" / "json.hpp").is_file():
+            include_paths.append(resolved)
+            seen.add(key)
+
+    return include_paths
+
+
+def _is_msvc_compiler(compiler: str) -> bool:
+    return Path(compiler).name.lower() in {"cl", "cl.exe"}
+
+
 def _compile_exporter(repo_root: Path, cpp_path: Path, binary_path: Path, context: str = "") -> None:
-    include_and_link_args = [
-        str(cpp_path),
-        "-I",
-        "/usr/local/include",
-        "-I",
-        str(repo_root / "utils" / "brookesia_lib_utils" / "include"),
-        "-I",
-        str(repo_root / "service" / "brookesia_service_helper" / "include"),
-        "-I",
-        str(repo_root / "service" / "brookesia_service_helper" / "host_test"),
-        "-I",
-        str(repo_root / "service" / "brookesia_service_manager" / "include"),
-        "-I",
-        str(repo_root / "agent" / "brookesia_agent_helper" / "include"),
-        "-pthread",
-        "-o",
-        str(binary_path),
+    boost_include_paths = _iter_boost_include_paths(repo_root)
+    if not boost_include_paths:
+        raise RuntimeError(
+            "Boost headers were not found. Set BOOST_ROOT/BOOST_INCLUDEDIR or place boost_* under repo/.tools."
+        )
+
+    include_paths = [
+        *boost_include_paths,
+        repo_root / "utils" / "brookesia_lib_utils" / "include",
+        repo_root / "service" / "brookesia_service_helper" / "include",
+        repo_root / "service" / "brookesia_service_helper" / "host_test",
+        repo_root / "service" / "brookesia_service_manager" / "include",
+        repo_root / "agent" / "brookesia_agent_helper" / "include",
     ]
 
     preferred = os.environ.get("CXX", "").strip()
@@ -136,8 +173,25 @@ def _compile_exporter(repo_root: Path, cpp_path: Path, binary_path: Path, contex
     standard_flags = ["-std=c++23", "-std=c++2b"]
     errors: list[str] = []
     for compiler in compilers:
+        is_msvc = _is_msvc_compiler(compiler)
+        if is_msvc:
+            output_path = binary_path.with_suffix(".exe")
+            standard_flags = ["/std:c++latest", "/std:c++20"]
+        else:
+            output_path = binary_path
+            standard_flags = ["-std=c++23", "-std=c++2b"]
+
         for standard_flag in standard_flags:
-            compile_command = [compiler, standard_flag, *include_and_link_args]
+            if is_msvc:
+                compile_command = [compiler, "/nologo", standard_flag, "/EHsc", str(cpp_path)]
+                for include_path in include_paths:
+                    compile_command.extend(["/I", str(include_path)])
+                compile_command.append(f"/Fe:{output_path}")
+            else:
+                compile_command = [compiler, standard_flag, str(cpp_path)]
+                for include_path in include_paths:
+                    compile_command.extend(["-I", str(include_path)])
+                compile_command.extend(["-pthread", "-o", str(output_path)])
             result = subprocess.run(
                 compile_command,
                 cwd=repo_root,
@@ -148,12 +202,16 @@ def _compile_exporter(repo_root: Path, cpp_path: Path, binary_path: Path, contex
             if result.returncode == 0:
                 return
 
-            stderr_lines = [line.rstrip() for line in result.stderr.splitlines() if line.strip()]
-            if stderr_lines:
-                if len(stderr_lines) <= 4:
-                    summary = " | ".join(stderr_lines)
+            output_lines = [
+                line.rstrip()
+                for line in (result.stdout.splitlines() + result.stderr.splitlines())
+                if line.strip()
+            ]
+            if output_lines:
+                if len(output_lines) <= 6:
+                    summary = " | ".join(output_lines)
                 else:
-                    summary = " | ".join(stderr_lines[:2] + ["..."] + stderr_lines[-2:])
+                    summary = " | ".join(output_lines[:3] + ["..."] + output_lines[-2:])
             else:
                 summary = f"exit code {result.returncode}"
             errors.append(f"{compiler} {standard_flag}: {summary}")
@@ -177,6 +235,8 @@ def export_helper_schemas(repo_root: Path, build_dir: Path, output_dir: Path) ->
         slug = f"{contract['category']}_{contract['slug']}"
         cpp_path = work_dir / f"helper_schema_exporter_{slug}.cpp"
         binary_path = work_dir / f"helper_schema_exporter_{slug}"
+        if os.name == "nt":
+            binary_path = binary_path.with_suffix(".exe")
         cpp_path.write_text(_generate_cpp_source([contract]), encoding="utf-8")
 
         _compile_exporter(
