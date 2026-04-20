@@ -17,6 +17,8 @@ From **v0.7**, ESP-Brookesia is componentized. Obtain components via the compone
 1. Components evolve independently but share the same **major.minor** version and depend on the same ESP-IDF release.
 2. The **release** branch maintains historical major versions; **master** integrates new features.
 
+Fork maintainers should use the normative branch contract described in `Fork Development Workflow <development_workflow>`__ when carrying upstream-bound work and long-lived fork customizations.
+
 Version support:
 
 .. list-table:: ESP-Brookesia version support

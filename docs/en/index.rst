@@ -116,6 +116,7 @@ The final products and projects built on top of the layers above:
    :hidden:
 
    Getting Started <getting_started>
+   Fork Development Workflow <development_workflow>
    Utils Components <utils/index>
    HAL Components <hal/index>
    Service Components <service/index>

@@ -116,6 +116,7 @@ ESP-Brookesia 采用分层架构设计，自底向上由 **环境与依赖**、*
    :hidden:
 
    快速开始 <getting_started>
+   Fork 分支协作规范 <development_workflow>
    工具组件 <utils/index>
    硬件抽象组件 <hal/index>
    服务组件 <service/index>
